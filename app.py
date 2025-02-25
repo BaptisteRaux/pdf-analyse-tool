@@ -167,7 +167,7 @@ def display_data(df_solvency, show_full_analysis=False):
         display_altair_chart(df_solvency, metric, chart_type, color)
 
 
-def download_excel(df, filename="comparaison.xlsx"):
+def download_excel(df, filename="analyse_sfcr.xlsx"):
     buffer = BytesIO()
     with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
         df_data = df[df['Société'] != 'Moyenne'].copy()
@@ -364,7 +364,7 @@ def main():
 
                 display_df = pd.concat([combined_df, moyenne], ignore_index=True)
                 st.dataframe(display_df)
-                download_excel(display_df, filename="metriques_comparaison.xlsx")
+                download_excel(display_df, filename="analyse_sfcr.xlsx")
                 tabs = st.tabs(["SCR ", "MCR ", "Ratio de solvabilité "])
                 
                 with tabs[0]:
