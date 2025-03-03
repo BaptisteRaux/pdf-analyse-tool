@@ -14,17 +14,20 @@ import openpyxl
 API_KEY = "sec_DfgTFrXbeytiqyKpk3uqhR3QIUlr1qGH"
 
 PROMPT_TEMPLATE = """
-Donne les réponses sous cette forme SCR : X, MCR : X , Ratio de solvabilité : X, 
-Le SCR est un montant en euros. Convertis les valeurs en nombres sans abréviation : 
-par exemple, écris '13 300 000 000€' au lieu de '13,3 Md€'. 
+Donne les réponses sous cette forme SCR : X, MCR : X, EOF : X, Ratio de solvabilité : X, 
+Le SCR, MCR et EOF sont des montants en euros. 
+Pour l'EOF (fonds propres éligibles), cherche dans le document les termes comme "fonds propres éligibles", "fonds propres disponibles" ou "fonds propres Solvabilité II".
+Convertis les valeurs en nombres sans abréviation : par exemple, écris '13 300 000 000€' au lieu de '13,3 Md€'. 
 Ne laisse aucune lettre pour désigner les millions ou milliards, uniquement le nombre complet en euros.
+Si tu trouves une valeur en millions d'euros, multiplie-la par 1 000 000 pour donner le montant exact en euros.
 """
 
 QUESTION_TEMPLATE = """
 0) Nom de la société : 
 1) Donne le SCR 
 2) Donne le MCR 
-3) Donne le ratio de solvabilité, également appelé le taux de couverture
+3) Donne les fonds propres éligibles (EOF). Cherche dans le document les mentions de "fonds propres éligibles", "fonds propres disponibles" ou "fonds propres Solvabilité II"
+4) Donne le ratio de solvabilité, également appelé le taux de couverture
 """
 
 def parse_solvency_text(text):
@@ -32,10 +35,17 @@ def parse_solvency_text(text):
         'company': r"0\)\s*Nom de la société\s*:\s*(.+)",
         'scr': r"1\)\s*SCR\s*:\s*([\d\s]+)€",
         'mcr': r"2\)\s*MCR\s*:\s*([\d\s]+)€",
-        'ratio': r"3\)\s*Ratio de solvabilité\s*:\s*([\d,\.]+)\s*%"
+        'eof': r"3\)\s*EOF\s*:\s*([\d\s]+)€",
+        'ratio': r"4\)\s*Ratio de solvabilité\s*:\s*([\d,\.]+)\s*%"
     }
     data = []
-    current_entry = {'Société': None, 'SCR (€)': np.nan, 'MCR (€)': np.nan, 'Ratio de solvabilité (%)': np.nan}
+    current_entry = {
+        'Société': None, 
+        'SCR (€)': np.nan, 
+        'MCR (€)': np.nan, 
+        'Fonds propres (€)': np.nan,
+        'Ratio de solvabilité (%)': np.nan
+    }
     
     for line in text.splitlines():
         for key, pattern in patterns.items():
@@ -44,11 +54,19 @@ def parse_solvency_text(text):
                 if key == 'company':
                     if current_entry['Société'] is not None:
                         data.append(current_entry.copy())
-                    current_entry = {'Société': match.group(1).strip(), 'SCR (€)': np.nan, 'MCR (€)': np.nan, 'Ratio de solvabilité (%)': np.nan}
+                    current_entry = {
+                        'Société': match.group(1).strip(), 
+                        'SCR (€)': np.nan, 
+                        'MCR (€)': np.nan, 
+                        'Fonds propres (€)': np.nan,
+                        'Ratio de solvabilité (%)': np.nan
+                    }
                 elif key == 'scr':
                     current_entry['SCR (€)'] = int(match.group(1).replace(" ", ""))
                 elif key == 'mcr':
                     current_entry['MCR (€)'] = int(match.group(1).replace(" ", ""))
+                elif key == 'eof':
+                    current_entry['Fonds propres (€)'] = int(match.group(1).replace(" ", ""))
                 elif key == 'ratio':
                     current_entry['Ratio de solvabilité (%)'] = float(match.group(1).replace(",", "."))
     
@@ -186,6 +204,12 @@ def download_excel(df, filename="analyse_sfcr.xlsx"):
                 df_data['MCR (€)'].min(),
                 df_data['MCR (€)'].max()
             ],
+            'Fonds propres (€)': [
+                df_data['Fonds propres (€)'].mean(),
+                df_data['Fonds propres (€)'].median(),
+                df_data['Fonds propres (€)'].min(),
+                df_data['Fonds propres (€)'].max()
+            ],
             'Ratio de solvabilité (%)': [
                 df_data['Ratio de solvabilité (%)'].mean(),
                 df_data['Ratio de solvabilité (%)'].median(),
@@ -196,10 +220,52 @@ def download_excel(df, filename="analyse_sfcr.xlsx"):
         
         df_data.to_excel(writer, sheet_name='Données', index=False)
         stats.to_excel(writer, sheet_name='Données', startrow=len(df_data) + 3, index=False)
+        
         workbook = writer.book
+        ws = writer.sheets['Données']
+
+        header_style = openpyxl.styles.NamedStyle(
+            name='header',
+            font=openpyxl.styles.Font(bold=True, color='FFFFFF'),
+            fill=openpyxl.styles.PatternFill(start_color='366092', end_color='366092', fill_type='solid'),
+            alignment=openpyxl.styles.Alignment(horizontal='center', vertical='center'),
+            border=openpyxl.styles.Border(
+                left=openpyxl.styles.Side(style='thin'),
+                right=openpyxl.styles.Side(style='thin'),
+                top=openpyxl.styles.Side(style='thin'),
+                bottom=openpyxl.styles.Side(style='thin')
+            )
+        )
+
+        for cell in ws[1]:
+            cell.style = header_style
+
+        stats_header_row = len(df_data) + 4
+        for cell in ws[stats_header_row]:
+            cell.style = header_style
+
+        for column in ws.columns:
+            max_length = 0
+            column = [cell for cell in column]
+            for cell in column:
+                try:
+                    if len(str(cell.value)) > max_length:
+                        max_length = len(str(cell.value))
+                except:
+                    pass
+            adjusted_width = (max_length + 2)
+            ws.column_dimensions[column[0].column_letter].width = adjusted_width
+
+        ws.freeze_panes = 'A2'
+
         ws_graphs = workbook.create_sheet(title='Graphiques')
         
-        for metric, start_row in [("SCR (€)", 1), ("MCR (€)", 15), ("Ratio de solvabilité (%)", 30)]:
+        for metric, start_row in [
+            ("SCR (€)", 1), 
+            ("MCR (€)", 15), 
+            ("Fonds propres (€)", 30),
+            ("Ratio de solvabilité (%)", 45)
+        ]:
             chart = openpyxl.chart.BarChart()
             chart.title = f"{metric} par société"
             chart.y_axis.title = metric
@@ -229,21 +295,19 @@ def download_excel(df, filename="analyse_sfcr.xlsx"):
             
             ws_graphs.add_chart(chart, f"A{start_row}")
         
-        for sheet in writer.sheets.values():
-            for column in sheet.columns:
-                max_length = 0
-                column = [cell for cell in column]
-                for cell in column:
-                    try:
-                        if len(str(cell.value)) > max_length:
-                            max_length = len(str(cell.value))
-                    except:
-                        pass
-                adjusted_width = (max_length + 2)
-                sheet.column_dimensions[column[0].column_letter].width = adjusted_width
+        for column in ws_graphs.columns:
+            max_length = 0
+            column = [cell for cell in column]
+            for cell in column:
+                try:
+                    if len(str(cell.value)) > max_length:
+                        max_length = len(str(cell.value))
+                except:
+                    pass
+            adjusted_width = (max_length + 2)
+            ws_graphs.column_dimensions[column[0].column_letter].width = adjusted_width
 
     buffer.seek(0)
-    
     st.download_button(
         label="Télécharger les données",
         data=buffer,
@@ -290,6 +354,14 @@ def create_matplotlib_figure(data, title, x_label, y_label, color='steelblue', m
     fig.tight_layout()
     return fig
 
+def get_predefined_prompts():
+    return {
+        "Analyse du SCR": "Analyse en détail la composition du SCR. Donne la répartition des différents modules de risques (marché, souscription, etc.) et leurs montants, attention à bien convertir les montants qui peuvent être en millions d'euros. Explique quels sont les risques principaux.",
+        "Analyse des fonds propres": "Analyse la composition des fonds propres. Détaille les différents tiers (Tier 1, 2, 3) et leur montant (attention à bien convertir si en millions d'euros). Compare avec l'année précédente si disponible et explique l'évolution.",
+        "Analyse du ratio de solvabilité": "Explique le ratio de solvabilité actuel et son évolution. Compare avec l'année précédente et explique les facteurs qui ont influencé ce ratio. Précise si des mesures particulières ont été prises pour maintenir ou améliorer ce ratio.",
+        "Analyse du MCR": "Donne les détails sur le MCR (Minimum Capital Requirement). Précise son montant (attention à bien convertir si en millions d'euros), explique son calcul et son évolution par rapport à l'année précédente."
+    }
+
 def main():
     st.title("📊 Analyse de rapports SFCR")
     
@@ -301,14 +373,12 @@ def main():
     - Possibilité de télécharger les données et graphiques au format XLSX
     """)
     
-    st.sidebar.header("Import de fichiers")
-    
-    if st.sidebar.button("Effacer les données PDFs"):
+    if st.sidebar.button("Recharger les données PDFs"):
         st.session_state.pdf_data = {}
         st.success("Les données PDFs ont été réinitialisées.")
     
     st.sidebar.subheader("Chargement de PDFs")
-    uploaded_files = st.sidebar.file_uploader("Uploader vos fichiers .pdf", type="pdf", accept_multiple_files=True)
+    uploaded_files = st.sidebar.file_uploader("Télécharger vos fichiers .pdf", type="pdf", accept_multiple_files=True)
     
     if "pdf_data" not in st.session_state:
         st.session_state.pdf_data = {}
@@ -340,67 +410,137 @@ def main():
     if st.session_state.pdf_data:
         nb_pdfs = len(st.session_state.pdf_data)
         
-        if nb_pdfs == 1:
-            pdf_name = list(st.session_state.pdf_data.keys())[0]
-            df_selected = st.session_state.pdf_data[pdf_name]
-            st.subheader(f"Données extraites pour : {pdf_name}")
-            display_data(df_selected, show_full_analysis=False)
-        else:
-            st.subheader("Comparaison entre PDFs")
-            selected_pdfs = st.sidebar.multiselect(
-                "Sélectionnez les PDFs à comparer",
-                list(st.session_state.pdf_data.keys()),
-                default=list(st.session_state.pdf_data.keys())
+        main_tabs = st.tabs(["Analyse", "Question"])
+        
+        with main_tabs[0]:
+            if nb_pdfs == 1:
+                pdf_name = list(st.session_state.pdf_data.keys())[0]
+                df_selected = st.session_state.pdf_data[pdf_name]
+                st.subheader(f"Données extraites pour : {pdf_name}")
+                display_data(df_selected, show_full_analysis=False)
+            else:
+                selected_pdfs = st.sidebar.multiselect(
+                    "Sélectionnez les PDFs à comparer",
+                    list(st.session_state.pdf_data.keys()),
+                    default=list(st.session_state.pdf_data.keys())
+                )
+                
+                if selected_pdfs:
+                    combined_df = pd.concat([st.session_state.pdf_data[name] for name in selected_pdfs], ignore_index=True)
+                    moyenne = pd.DataFrame({
+                        'Société': ['Moyenne'],
+                        'SCR (€)': [round(combined_df['SCR (€)'].mean(), 2)],
+                        'MCR (€)': [round(combined_df['MCR (€)'].mean(), 2)],
+                        'Fonds propres (€)': [round(combined_df['Fonds propres (€)'].mean(), 2)],
+                        'Ratio de solvabilité (%)': [round(combined_df['Ratio de solvabilité (%)'].mean(), 2)]
+                    })
+
+                    display_df = pd.concat([combined_df, moyenne], ignore_index=True)
+                    
+                    download_excel(display_df, filename="analyse_sfcr.xlsx")
+                    st.subheader("Comparaison entre PDFs")
+                    st.dataframe(display_df)
+                    
+                    metric_tabs = st.tabs(["SCR ", "MCR ", "Fonds propres ", "Ratio de solvabilité "])
+                    
+                    with metric_tabs[0]:
+                        fig_scr = create_matplotlib_figure(
+                            combined_df,
+                            "SCR par PDF", 
+                            "Société", 
+                            "SCR (€)", 
+                            'skyblue',
+                            moyenne=moyenne['SCR (€)'].values[0]
+                        )
+                        st.pyplot(fig_scr)
+                    
+                    with metric_tabs[1]:
+                        fig_mcr = create_matplotlib_figure(
+                            combined_df,
+                            "MCR par PDF", 
+                            "Société", 
+                            "MCR (€)", 
+                            'lightgreen',
+                            moyenne=moyenne['MCR (€)'].values[0]
+                        )
+                        st.pyplot(fig_mcr)
+                    
+                    with metric_tabs[2]:
+                        fig_eof = create_matplotlib_figure(
+                            combined_df,
+                            "Fonds propres par PDF",
+                            "Société", 
+                            "Fonds propres (€)",
+                            'orange',
+                            moyenne=moyenne['Fonds propres (€)'].values[0]
+                        )
+                        st.pyplot(fig_eof)
+                    
+                    with metric_tabs[3]:
+                        fig_ratio = create_matplotlib_figure(
+                            combined_df,
+                            "Ratio de solvabilité par PDF", 
+                            "Société", 
+                            "Ratio de solvabilité (%)", 
+                            'plum',
+                            moyenne=moyenne['Ratio de solvabilité (%)'].values[0]
+                        )
+                        st.pyplot(fig_ratio)
+                else:
+                    st.info("Veuillez sélectionner au moins un PDF pour la comparaison.")
+        
+        with main_tabs[1]:
+            st.subheader("Question sur le document")
+            selected_pdf = st.selectbox(
+                "Sélectionner un PDF",
+                list(st.session_state.pdf_data.keys())
+            )
+
+            # Initialiser la question dans session_state si pas déjà fait
+            if 'user_question' not in st.session_state:
+                st.session_state.user_question = ""
+
+            # Ajout des boutons pour les prompts prédéfinis
+            col1, col2 = st.columns(2)
+            predefined_prompts = get_predefined_prompts()
+            
+            with col1:
+                if st.button("Analyse du SCR"):
+                    st.session_state.user_question = predefined_prompts["Analyse du SCR"]
+                if st.button("Analyse des fonds propres"):
+                    st.session_state.user_question = predefined_prompts["Analyse des fonds propres"]
+            
+            with col2:
+                if st.button("Analyse du ratio de solvabilité"):
+                    st.session_state.user_question = predefined_prompts["Analyse du ratio de solvabilité"]
+                if st.button("Analyse du MCR"):
+                    st.session_state.user_question = predefined_prompts["Analyse du MCR"]
+
+            # Zone de texte avec la valeur de session_state
+            user_question = st.text_area(
+                "Poser votre question sur le PDF",
+                value=st.session_state.user_question,
+                height=100,
+                key="question_input"
             )
             
-            if selected_pdfs:
-                combined_df = pd.concat([st.session_state.pdf_data[name] for name in selected_pdfs], ignore_index=True)
-                moyenne = pd.DataFrame({
-                    'Société': ['Moyenne'],
-                    'SCR (€)': [round(combined_df['SCR (€)'].mean(), 2)],
-                    'MCR (€)': [round(combined_df['MCR (€)'].mean(), 2)],
-                    'Ratio de solvabilité (%)': [round(combined_df['Ratio de solvabilité (%)'].mean(), 2)]
-                })
-
-                display_df = pd.concat([combined_df, moyenne], ignore_index=True)
-                st.dataframe(display_df)
-                download_excel(display_df, filename="analyse_sfcr.xlsx")
-                tabs = st.tabs(["SCR ", "MCR ", "Ratio de solvabilité "])
-                
-                with tabs[0]:
-                    fig_scr = create_matplotlib_figure(
-                        combined_df,
-                        "SCR par PDF", 
-                        "Société", 
-                        "SCR (€)", 
-                        'skyblue',
-                        moyenne=moyenne['SCR (€)'].values[0]
-                    )
-                    st.pyplot(fig_scr)
-                
-                with tabs[1]:
-                    fig_mcr = create_matplotlib_figure(
-                        combined_df,
-                        "MCR par PDF", 
-                        "Société", 
-                        "MCR (€)", 
-                        'lightgreen',
-                        moyenne=moyenne['MCR (€)'].values[0]
-                    )
-                    st.pyplot(fig_mcr)
-                
-                with tabs[2]:
-                    fig_ratio = create_matplotlib_figure(
-                        combined_df,
-                        "Ratio de solvabilité par PDF", 
-                        "Société", 
-                        "Ratio de solvabilité (%)", 
-                        'plum',
-                        moyenne=moyenne['Ratio de solvabilité (%)'].values[0]
-                    )
-                    st.pyplot(fig_ratio)
-            else:
-                st.info("Veuillez sélectionner au moins un PDF pour la comparaison.")
+            if st.button("Valider la question"):
+                if user_question:
+                    with st.spinner("Traitement de votre question..."):
+                        pdf_file = [f for f in uploaded_files if f.name == selected_pdf][0]
+                        source_id = add_pdf_from_file(pdf_file)
+                        
+                        if source_id:
+                            response = chat_with_pdf(source_id, user_question)
+                            if response:
+                                st.write("Réponse :")
+                                st.write(response)
+                            else:
+                                st.error("Désolé, je n'ai pas pu obtenir de réponse.")
+                        else:
+                            st.error("Erreur lors de l'accès au PDF.")
+                else:
+                    st.warning("Veuillez entrer une question.")
     else:
         st.warning("Aucun PDF n'a encore été traité. Veuillez uploader au moins un fichier .pdf.")
 
