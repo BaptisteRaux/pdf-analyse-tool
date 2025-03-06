@@ -17,16 +17,18 @@ PROMPT_TEMPLATE = """
 Donne les réponses sous cette forme SCR : X, MCR : X, EOF : X, Ratio de solvabilité : X, 
 Le SCR, MCR et EOF sont des montants en euros. 
 Pour l'EOF (fonds propres éligibles), cherche dans le document les termes comme "fonds propres éligibles", "fonds propres disponibles" ou "fonds propres Solvabilité II".
-Convertis les valeurs en nombres sans abréviation : par exemple, écris '13 300 000 000€' au lieu de '13,3 Md€'. 
+IMPORTANT : Si tu trouves une valeur en millions d'euros, tu dois la convertir en multipliant par 1 000 000.
+Par exemple :
+- Si tu trouves "10 642 millions d'euros", tu dois écrire "10 642 000 000€"
+- Si tu trouves "1,5 milliards d'euros", tu dois écrire "1 500 000 000€"
 Ne laisse aucune lettre pour désigner les millions ou milliards, uniquement le nombre complet en euros.
-Si tu trouves une valeur en millions d'euros, multiplie-la par 1 000 000 pour donner le montant exact en euros.
 """
 
 QUESTION_TEMPLATE = """
 0) Nom de la société : 
 1) Donne le SCR 
 2) Donne le MCR 
-3) Donne les fonds propres éligibles (EOF). Cherche dans le document les mentions de "fonds propres éligibles", "fonds propres disponibles" ou "fonds propres Solvabilité II"
+3) Donne les fonds propres éligibles (EOF). Cherche dans le document les mentions de "fonds propres éligibles", "fonds propres disponibles" ou "fonds propres Solvabilité II. ATTENTION : Si la valeur est en millions d'euros, multiplie par 1 000 000 pour donner le montant en euros.
 4) Donne le ratio de solvabilité, également appelé le taux de couverture
 """
 
@@ -35,7 +37,7 @@ def parse_solvency_text(text):
         'company': r"0\)\s*Nom de la société\s*:\s*(.+)",
         'scr': r"1\)\s*SCR\s*:\s*([\d\s]+)€",
         'mcr': r"2\)\s*MCR\s*:\s*([\d\s]+)€",
-        'eof': r"3\)\s*EOF\s*:\s*([\d\s]+)€",
+        'eof': r"3\)\s*(?:(?:Fonds\s+propres\s+éligibles\s*(?:\(EOF\))?|EOF)\s*:\s*([\d\s]+)€)",
         'ratio': r"4\)\s*Ratio de solvabilité\s*:\s*([\d,\.]+)\s*%"
     }
     data = []
@@ -66,7 +68,11 @@ def parse_solvency_text(text):
                 elif key == 'mcr':
                     current_entry['MCR (€)'] = int(match.group(1).replace(" ", ""))
                 elif key == 'eof':
-                    current_entry['Fonds propres (€)'] = int(match.group(1).replace(" ", ""))
+                    value = match.group(1) if match.group(1) else match.group(2)
+                    value = int(value.replace(" ", ""))
+                    if "million" in line:
+                        value = value * 1_000_000
+                    current_entry['Fonds propres (€)'] = value
                 elif key == 'ratio':
                     current_entry['Ratio de solvabilité (%)'] = float(match.group(1).replace(",", "."))
     
@@ -136,12 +142,14 @@ def display_altair_chart(df, metric, chart_type, color):
         chart = base.mark_point(color=color, size=100)
     else:
         chart = base.mark_bar(color=color)
+
     chart = chart.properties(width=600, height=400).interactive()
     st.altair_chart(chart, use_container_width=True)
 
 def display_data(df_solvency, show_full_analysis=False):
     st.subheader("Aperçu des données")
     st.dataframe(df_solvency)
+
     if show_full_analysis:
         st.subheader("Métriques clés")
         col1, col2, col3 = st.columns(3)
@@ -159,6 +167,7 @@ def display_data(df_solvency, show_full_analysis=False):
             plt.style.use('seaborn')
         except OSError:
             plt.style.use('ggplot')
+
         fig, ax = plt.subplots(figsize=(12, 8))
         if option == "SCR (€)":
             ax.bar(df_solvency["Société"], df_solvency["SCR (€)"].fillna(0), color='skyblue')
@@ -172,12 +181,12 @@ def display_data(df_solvency, show_full_analysis=False):
             ax.bar(df_solvency["Société"], df_solvency["Solvency Ratio (%)"].fillna(0), color='lightgreen')
             ax.set_title("Ratio de solvabilité par société", fontsize=16, fontweight='bold')
             ax.set_ylabel("Ratio (%)", fontsize=14)
+
         ax.tick_params(axis='x', labelsize=12, rotation=45)
         ax.tick_params(axis='y', labelsize=12)
         ax.grid(True)
         fig.tight_layout()
         st.pyplot(fig)
-
         st.subheader("Graphique interactif Altair")
         chart_type = st.sidebar.radio("Type de graphique interactif", ("Barres", "Lignes", "Scatter"))
         color = st.sidebar.color_picker("Choisissez la couleur", "#1f77b4")
@@ -189,7 +198,6 @@ def download_excel(df, filename="analyse_sfcr.xlsx"):
     buffer = BytesIO()
     with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
         df_data = df[df['Société'] != 'Moyenne'].copy()
-
         stats = pd.DataFrame({
             'Statistique': ['Moyenne', 'Médiane', 'Minimum', 'Maximum'],
             'SCR (€)': [
@@ -220,10 +228,8 @@ def download_excel(df, filename="analyse_sfcr.xlsx"):
         
         df_data.to_excel(writer, sheet_name='Données', index=False)
         stats.to_excel(writer, sheet_name='Données', startrow=len(df_data) + 3, index=False)
-        
         workbook = writer.book
         ws = writer.sheets['Données']
-
         header_style = openpyxl.styles.NamedStyle(
             name='header',
             font=openpyxl.styles.Font(bold=True, color='FFFFFF'),
@@ -257,9 +263,7 @@ def download_excel(df, filename="analyse_sfcr.xlsx"):
             ws.column_dimensions[column[0].column_letter].width = adjusted_width
 
         ws.freeze_panes = 'A2'
-
         ws_graphs = workbook.create_sheet(title='Graphiques')
-        
         for metric, start_row in [
             ("SCR (€)", 1), 
             ("MCR (€)", 15), 
@@ -287,12 +291,9 @@ def download_excel(df, filename="analyse_sfcr.xlsx"):
             
             chart.add_data(data, titles_from_data=True)
             chart.set_categories(cats)
-            
-            moyenne = df[df['Société'] == 'Moyenne'][metric].values[0]
             serie_moyenne = openpyxl.chart.ScatterChart()
             serie_moyenne.y_axis.crosses = "max"
             serie_moyenne.title = "Moyenne"
-            
             ws_graphs.add_chart(chart, f"A{start_row}")
         
         for column in ws_graphs.columns:
@@ -304,6 +305,7 @@ def download_excel(df, filename="analyse_sfcr.xlsx"):
                         max_length = len(str(cell.value))
                 except:
                     pass
+
             adjusted_width = (max_length + 2)
             ws_graphs.column_dimensions[column[0].column_letter].width = adjusted_width
 
@@ -317,11 +319,7 @@ def download_excel(df, filename="analyse_sfcr.xlsx"):
 
 def create_matplotlib_figure(data, title, x_label, y_label, color='steelblue', moyenne=None):
     fig, ax = plt.subplots(figsize=(12, 8), dpi=120)
-    
-    # Créer le graphique en barres
     bars = ax.bar(data["Société"], data[y_label], color=color)
-    
-    # Utiliser la moyenne passée en paramètre
     if moyenne is not None:
         ax.axhline(y=moyenne, color='red', linestyle='--', alpha=0.8)
         ax.annotate(f'Moyenne: {moyenne:,.2f}', 
@@ -332,8 +330,7 @@ def create_matplotlib_figure(data, title, x_label, y_label, color='steelblue', m
                     va='bottom',
                     color='red',
                     fontweight='bold')
-    
-    # Configuration du graphique
+
     ax.set_title(title, fontsize=18, fontweight='bold')
     ax.set_xlabel(x_label, fontsize=14)
     ax.set_ylabel(y_label, fontsize=14)
@@ -342,7 +339,6 @@ def create_matplotlib_figure(data, title, x_label, y_label, color='steelblue', m
     ax.spines['top'].set_visible(False)
     ax.spines['right'].set_visible(False)
     ax.grid(True, linestyle='--', alpha=0.6)
-
     for bar in bars:
         height = bar.get_height()
         ax.annotate(f'{height:,.2f}',
@@ -364,7 +360,6 @@ def get_predefined_prompts():
 
 def main():
     st.title("📊 Analyse de rapports SFCR")
-    
     st.markdown("""
     ### Instructions
     - Chargez un ou plusieurs fichiers PDF
@@ -372,20 +367,20 @@ def main():
     - Pour plusieurs PDFs : comparaison automatique avec graphiques et statistiques
     - Possibilité de télécharger les données et graphiques au format XLSX
     """)
-    
+
     if st.sidebar.button("Recharger les données PDFs"):
         st.session_state.pdf_data = {}
         st.success("Les données PDFs ont été réinitialisées.")
     
     st.sidebar.subheader("Chargement de PDFs")
     uploaded_files = st.sidebar.file_uploader("Télécharger vos fichiers .pdf", type="pdf", accept_multiple_files=True)
-    
+
     if "pdf_data" not in st.session_state:
         st.session_state.pdf_data = {}
     
     prompt = PROMPT_TEMPLATE
     question = QUESTION_TEMPLATE
-    
+
     if uploaded_files:
         progress_placeholder = st.empty()
         for pdf_file in uploaded_files:
@@ -409,10 +404,59 @@ def main():
 
     if st.session_state.pdf_data:
         nb_pdfs = len(st.session_state.pdf_data)
-        
-        main_tabs = st.tabs(["Analyse", "Question"])
+        main_tabs = st.tabs(["Question", "Analyse"])
         
         with main_tabs[0]:
+            st.subheader("Question sur le document")
+            selected_pdf = st.selectbox(
+                "Sélectionner un PDF",
+                list(st.session_state.pdf_data.keys())
+            )
+
+            if 'user_question' not in st.session_state:
+                st.session_state.user_question = ""
+
+            col1, col2 = st.columns(2)
+            predefined_prompts = get_predefined_prompts()
+            
+            with col1:
+                if st.button("Analyse du SCR"):
+                    st.session_state.user_question = predefined_prompts["Analyse du SCR"]
+                if st.button("Analyse des fonds propres"):
+                    st.session_state.user_question = predefined_prompts["Analyse des fonds propres"]
+            
+            with col2:
+                if st.button("Analyse du ratio de solvabilité"):
+                    st.session_state.user_question = predefined_prompts["Analyse du ratio de solvabilité"]
+                if st.button("Analyse du MCR"):
+                    st.session_state.user_question = predefined_prompts["Analyse du MCR"]
+
+            user_question = st.text_area(
+                "Poser votre question sur le PDF",
+                value=st.session_state.user_question,
+                height=100,
+                key="question_input"
+            )
+            
+            if st.button("Valider la question"):
+                if user_question:
+                    with st.spinner("Traitement de votre question..."):
+                        pdf_file = [f for f in uploaded_files if f.name == selected_pdf][0]
+                        source_id = add_pdf_from_file(pdf_file)
+                        
+                        if source_id:
+                            response = chat_with_pdf(source_id, user_question)
+                            if response:
+                                st.write("Réponse :")
+                                st.write(response)
+                            else:
+                                st.error("Désolé, je n'ai pas pu obtenir de réponse.")
+                        else:
+                            st.error("Erreur lors de l'accès au PDF.")
+                else:
+                    st.warning("Veuillez entrer une question.")
+
+        with main_tabs[1]:
             if nb_pdfs == 1:
                 pdf_name = list(st.session_state.pdf_data.keys())[0]
                 df_selected = st.session_state.pdf_data[pdf_name]
@@ -488,59 +532,6 @@ def main():
                         st.pyplot(fig_ratio)
                 else:
                     st.info("Veuillez sélectionner au moins un PDF pour la comparaison.")
-        
-        with main_tabs[1]:
-            st.subheader("Question sur le document")
-            selected_pdf = st.selectbox(
-                "Sélectionner un PDF",
-                list(st.session_state.pdf_data.keys())
-            )
-
-            # Initialiser la question dans session_state si pas déjà fait
-            if 'user_question' not in st.session_state:
-                st.session_state.user_question = ""
-
-            # Ajout des boutons pour les prompts prédéfinis
-            col1, col2 = st.columns(2)
-            predefined_prompts = get_predefined_prompts()
-            
-            with col1:
-                if st.button("Analyse du SCR"):
-                    st.session_state.user_question = predefined_prompts["Analyse du SCR"]
-                if st.button("Analyse des fonds propres"):
-                    st.session_state.user_question = predefined_prompts["Analyse des fonds propres"]
-            
-            with col2:
-                if st.button("Analyse du ratio de solvabilité"):
-                    st.session_state.user_question = predefined_prompts["Analyse du ratio de solvabilité"]
-                if st.button("Analyse du MCR"):
-                    st.session_state.user_question = predefined_prompts["Analyse du MCR"]
-
-            # Zone de texte avec la valeur de session_state
-            user_question = st.text_area(
-                "Poser votre question sur le PDF",
-                value=st.session_state.user_question,
-                height=100,
-                key="question_input"
-            )
-            
-            if st.button("Valider la question"):
-                if user_question:
-                    with st.spinner("Traitement de votre question..."):
-                        pdf_file = [f for f in uploaded_files if f.name == selected_pdf][0]
-                        source_id = add_pdf_from_file(pdf_file)
-                        
-                        if source_id:
-                            response = chat_with_pdf(source_id, user_question)
-                            if response:
-                                st.write("Réponse :")
-                                st.write(response)
-                            else:
-                                st.error("Désolé, je n'ai pas pu obtenir de réponse.")
-                        else:
-                            st.error("Erreur lors de l'accès au PDF.")
-                else:
-                    st.warning("Veuillez entrer une question.")
     else:
         st.warning("Aucun PDF n'a encore été traité. Veuillez uploader au moins un fichier .pdf.")
 
