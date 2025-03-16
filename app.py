@@ -11,7 +11,7 @@ from io import BytesIO
 import altair as alt
 import openpyxl
 
-API_KEY = "sec_DfgTFrXbeytiqyKpk3uqhR3QIUlr1qGH"
+API_KEY = "sec_tuAeW19bROXFZ4xvJMbXzsQmPktiaZv5"
 
 PROMPT_TEMPLATE = """
 Donne les réponses sous cette forme SCR : X, MCR : X, EOF : X, Ratio de solvabilité : X, 
