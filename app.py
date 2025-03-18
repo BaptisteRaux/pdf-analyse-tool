@@ -13,39 +13,69 @@ import openpyxl
 
 API_KEY = "***REMOVED***"
 
-PROMPT_TEMPLATE = """
-Donne les réponses sous cette forme SCR : X, MCR : X, EOF : X, Ratio de solvabilité : X, 
-Le SCR, MCR et EOF sont des montants en euros. 
-Pour l'EOF (fonds propres éligibles), cherche dans le document les termes comme "fonds propres éligibles", "fonds propres disponibles" ou "fonds propres Solvabilité II".
-IMPORTANT : Si tu trouves une valeur en millions d'euros, tu dois la convertir en multipliant par 1 000 000.
-Par exemple :
-- Si tu trouves "10 642 millions d'euros", tu dois écrire "10 642 000 000€"
-- Si tu trouves "1,5 milliards d'euros", tu dois écrire "1 500 000 000€"
-Ne laisse aucune lettre pour désigner les millions ou milliards, uniquement le nombre complet en euros.
+PROMPT_TEMPLATE_BASE = """
+Analyse le document et donne les réponses sous cette forme EXACTE, sans aucun texte supplémentaire :
+1) SCR : X€
+2) MCR : X€
+3) Ratio de solvabilité : X%
+
+IMPORTANT : 
+- Si tu trouves une valeur en millions d'euros (M€), convertis-la en euros (multiplie par 1 000 000)
+- Si tu trouves une valeur en milliards d'euros (Md€), convertis-la en euros (multiplie par 1 000 000 000)
+- Donne uniquement les chiffres, sans aucune explication
+- Respecte EXACTEMENT le format demandé
 """
 
-QUESTION_TEMPLATE = """
+PROMPT_TEMPLATE_FONDS_PROPRES = """
+Analyse le document et donne les réponses sous cette forme EXACTE, sans aucun texte supplémentaire :
+1) Éléments éligibles (total des fonds propres) : X€
+2) Capital et primes : X€
+3) Réserve de réconciliation : X€
+4) Dettes subordonnées : X€
+5) Fonds excédentaires : X€
+
+IMPORTANT : 
+- Si tu trouves une valeur en millions d'euros (M€), convertis-la en euros (multiplie par 1 000 000)
+- Si tu trouves une valeur en milliards d'euros (Md€), convertis-la en euros (multiplie par 1 000 000 000)
+- Pour le capital et primes, si tu trouves ces éléments séparément (capital social + primes d'émission), additionne-les et donne uniquement le total
+- Donne uniquement les chiffres, sans aucune explication ni détail
+- Respecte EXACTEMENT le format demandé
+- N'ajoute pas de tirets, de puces ou d'autres caractères
+- N'ajoute pas de texte explicatif
+"""
+
+QUESTION_TEMPLATE_BASE = """
+Réponds UNIQUEMENT avec les informations demandées, sans aucun texte supplémentaire :
 0) Nom de la société : 
-1) Donne le SCR 
-2) Donne le MCR 
-3) Donne les fonds propres éligibles (EOF). Cherche dans le document les mentions de "fonds propres éligibles", "fonds propres disponibles" ou "fonds propres Solvabilité II. ATTENTION : Si la valeur est en millions d'euros, multiplie par 1 000 000 pour donner le montant en euros.
-4) Donne le ratio de solvabilité, également appelé le taux de couverture
+1) SCR : 
+2) MCR : 
+3) Ratio de solvabilité : 
 """
 
-def parse_solvency_text(text):
+QUESTION_TEMPLATE_FONDS_PROPRES = """
+Réponds UNIQUEMENT avec les informations demandées, sans aucun texte supplémentaire :
+1) Éléments éligibles (total des fonds propres) : 
+2) Capital et primes : 
+3) Réserve de réconciliation : 
+4) Dettes subordonnées : 
+5) Fonds excédentaires : 
+
+Pour le capital et primes, si tu trouves ces éléments séparément (capital social + primes d'émission), additionne-les et donne uniquement le total.
+"""
+
+def parse_base_text(text):
     patterns = {
         'company': r"0\)\s*Nom de la société\s*:\s*(.+)",
         'scr': r"1\)\s*SCR\s*:\s*([\d\s]+)€",
         'mcr': r"2\)\s*MCR\s*:\s*([\d\s]+)€",
-        'eof': r"3\)\s*(?:(?:Fonds\s+propres\s+éligibles\s*(?:\(EOF\))?|EOF)\s*:\s*([\d\s]+)€)",
-        'ratio': r"4\)\s*Ratio de solvabilité\s*:\s*([\d,\.]+)\s*%"
+        'ratio': r"3\)\s*Ratio de solvabilité\s*:\s*([\d,\.]+)\s*%"
     }
+    
     data = []
     current_entry = {
-        'Société': None, 
-        'SCR (€)': np.nan, 
-        'MCR (€)': np.nan, 
-        'Fonds propres (€)': np.nan,
+        'Société': None,
+        'SCR (€)': np.nan,
+        'MCR (€)': np.nan,
         'Ratio de solvabilité (%)': np.nan
     }
     
@@ -60,24 +90,130 @@ def parse_solvency_text(text):
                         'Société': match.group(1).strip(), 
                         'SCR (€)': np.nan, 
                         'MCR (€)': np.nan, 
-                        'Fonds propres (€)': np.nan,
                         'Ratio de solvabilité (%)': np.nan
                     }
                 elif key == 'scr':
                     current_entry['SCR (€)'] = int(match.group(1).replace(" ", ""))
                 elif key == 'mcr':
                     current_entry['MCR (€)'] = int(match.group(1).replace(" ", ""))
-                elif key == 'eof':
-                    value = match.group(1) if match.group(1) else match.group(2)
-                    value = int(value.replace(" ", ""))
-                    if "million" in line:
-                        value = value * 1_000_000
-                    current_entry['Fonds propres (€)'] = value
                 elif key == 'ratio':
                     current_entry['Ratio de solvabilité (%)'] = float(match.group(1).replace(",", "."))
     
     if current_entry['Société'] is not None:
         data.append(current_entry)
+    return pd.DataFrame(data)
+
+def parse_fonds_propres_text(text):
+    # Patterns plus flexibles pour capturer différents formats
+    patterns = {
+        'elements_eligibles': r"1\)\s*Éléments éligibles[^:]*:\s*([\d\s,\.]+)(?:€|Md€|M€)",
+        'capital_primes': r"2\)\s*Capital et primes\s*:\s*([\d\s,\.]+)(?:€|Md€|M€)",
+        'reserve_reconciliation': r"3\)\s*Réserve de réconciliation\s*:\s*([\d\s,\.]+)(?:€|Md€|M€)",
+        'dettes_subordonnees': r"4\)\s*Dettes subordonnées\s*:\s*([\d\s,\.]+)(?:€|Md€|M€)",
+        'fonds_excedentaires': r"5\)\s*Fonds excédentaires\s*:\s*([\d\s,\.]+)(?:€|Md€|M€)"
+    }
+    
+    # Patterns alternatifs pour capturer les valeurs en milliards ou millions
+    alt_patterns = {
+        'elements_eligibles': r"Éléments éligibles[^:]*:\s*([\d\s,\.]+)\s*(?:Md€|milliards|milliard)",
+        'capital_primes': r"Capital et primes\s*:\s*([\d\s,\.]+)\s*(?:Md€|milliards|milliard)",
+        'reserve_reconciliation': r"Réserve de réconciliation\s*:\s*([\d\s,\.]+)\s*(?:Md€|milliards|milliard)",
+        'dettes_subordonnees': r"Dettes subordonnées\s*:\s*([\d\s,\.]+)\s*(?:Md€|milliards|milliard)",
+        'fonds_excedentaires': r"Fonds excédentaires\s*:\s*([\d\s,\.]+)\s*(?:Md€|milliards|milliard)"
+    }
+    
+    # Patterns pour millions
+    million_patterns = {
+        'elements_eligibles': r"Éléments éligibles[^:]*:\s*([\d\s,\.]+)\s*(?:M€|millions|million)",
+        'capital_primes': r"Capital et primes\s*:\s*([\d\s,\.]+)\s*(?:M€|millions|million)",
+        'reserve_reconciliation': r"Réserve de réconciliation\s*:\s*([\d\s,\.]+)\s*(?:M€|millions|million)",
+        'dettes_subordonnees': r"Dettes subordonnées\s*:\s*([\d\s,\.]+)\s*(?:M€|millions|million)",
+        'fonds_excedentaires': r"Fonds excédentaires\s*:\s*([\d\s,\.]+)\s*(?:M€|millions|million)"
+    }
+    
+    data = []
+    current_entry = {
+        'Éléments éligibles (€)': np.nan,
+        'Capital et primes (€)': np.nan,
+        'Réserve de réconciliation (€)': np.nan,
+        'Dettes subordonnées (€)': np.nan,
+        'Fonds excédentaires (€)': np.nan
+    }
+    
+    # Fonction pour convertir les valeurs en fonction de l'unité
+    def convert_value(value_str, unit_pattern):
+        value_str = value_str.replace(" ", "").replace(",", ".")
+        try:
+            value = float(value_str)
+            if "Md€" in unit_pattern or "milliard" in unit_pattern:
+                return value * 1_000_000_000
+            elif "M€" in unit_pattern or "million" in unit_pattern:
+                return value * 1_000_000
+            else:
+                return value
+        except ValueError:
+            return np.nan
+    
+    # Chercher les patterns standards
+    for key, pattern in patterns.items():
+        match = re.search(pattern, text)
+        if match:
+            value_str = match.group(1)
+            unit_pattern = match.group(0)
+            value = convert_value(value_str, unit_pattern)
+            
+            if key == 'elements_eligibles':
+                current_entry['Éléments éligibles (€)'] = value
+            elif key == 'capital_primes':
+                current_entry['Capital et primes (€)'] = value
+            elif key == 'reserve_reconciliation':
+                current_entry['Réserve de réconciliation (€)'] = value
+            elif key == 'dettes_subordonnees':
+                current_entry['Dettes subordonnées (€)'] = value
+            elif key == 'fonds_excedentaires':
+                current_entry['Fonds excédentaires (€)'] = value
+    
+    # Chercher les patterns alternatifs (milliards)
+    for key, pattern in alt_patterns.items():
+        column_mapping = {
+            'elements_eligibles': 'Éléments éligibles (€)',
+            'capital_primes': 'Capital et primes (€)',
+            'reserve_reconciliation': 'Réserve de réconciliation (€)',
+            'dettes_subordonnees': 'Dettes subordonnées (€)',
+            'fonds_excedentaires': 'Fonds excédentaires (€)'
+        }
+        
+        column_name = column_mapping[key]
+        
+        if pd.isna(current_entry[column_name]):
+            match = re.search(pattern, text)
+            if match:
+                value_str = match.group(1)
+                unit_pattern = match.group(0)
+                value = convert_value(value_str, unit_pattern)
+                current_entry[column_name] = value
+    
+    # Chercher les patterns pour millions
+    for key, pattern in million_patterns.items():
+        column_name = column_mapping[key]
+        
+        if pd.isna(current_entry[column_name]):
+            match = re.search(pattern, text)
+            if match:
+                value_str = match.group(1)
+                unit_pattern = match.group(0)
+                value = convert_value(value_str, unit_pattern)
+                current_entry[column_name] = value
+    
+    # Recherche spécifique pour les valeurs numériques dans le texte
+    if pd.isna(current_entry['Éléments éligibles (€)']):
+        match = re.search(r"Éléments éligibles.*?(\d[\d\s,\.]+)(?:€|Md€|M€)", text, re.IGNORECASE)
+        if match:
+            value_str = match.group(1)
+            unit_pattern = match.group(0)
+            current_entry['Éléments éligibles (€)'] = convert_value(value_str, unit_pattern)
+    
+    data.append(current_entry)
     return pd.DataFrame(data)
 
 def add_pdf_from_file(uploaded_file):
@@ -109,7 +245,9 @@ def chat_with_pdf(source_id, question, prompt=None):
     try:
         response = requests.post(url, json=data, headers=headers)
         response.raise_for_status()
-        return response.json()["content"]
+        content = response.json()["content"]
+        
+        return content
     except requests.exceptions.RequestException as e:
         st.error(f"Erreur lors de la requête à ChatPDF : {e}")
         if e.response is not None:
@@ -193,129 +331,226 @@ def display_data(df_solvency, show_full_analysis=False):
         metric = st.selectbox("Sélectionnez la métrique", ("SCR (€)", "MCR (€)", "Solvency Ratio (%)"))
         display_altair_chart(df_solvency, metric, chart_type, color)
 
-
 def download_excel(df, filename="analyse_sfcr.xlsx"):
     buffer = BytesIO()
-    with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-        df_data = df[df['Société'] != 'Moyenne'].copy()
-        stats = pd.DataFrame({
-            'Statistique': ['Moyenne', 'Médiane', 'Minimum', 'Maximum'],
-            'SCR (€)': [
-                df_data['SCR (€)'].mean(),
-                df_data['SCR (€)'].median(),
-                df_data['SCR (€)'].min(),
-                df_data['SCR (€)'].max()
-            ],
-            'MCR (€)': [
-                df_data['MCR (€)'].mean(),
-                df_data['MCR (€)'].median(),
-                df_data['MCR (€)'].min(),
-                df_data['MCR (€)'].max()
-            ],
-            'Fonds propres (€)': [
-                df_data['Fonds propres (€)'].mean(),
-                df_data['Fonds propres (€)'].median(),
-                df_data['Fonds propres (€)'].min(),
-                df_data['Fonds propres (€)'].max()
-            ],
-            'Ratio de solvabilité (%)': [
-                df_data['Ratio de solvabilité (%)'].mean(),
-                df_data['Ratio de solvabilité (%)'].median(),
-                df_data['Ratio de solvabilité (%)'].min(),
-                df_data['Ratio de solvabilité (%)'].max()
+    try:
+        with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+            df_donnees = df[df['Société'] != 'Moyenne'].copy()
+            
+            # Onglet avec les données brutes
+            df_donnees.to_excel(writer, sheet_name="Données brutes", index=False)
+            
+            # Calculer les statistiques
+            stats_data = {
+                'Métrique': ['Moyenne', 'Médiane', 'Écart-type', 'Minimum', 'Maximum'],
+                'SCR (€)': [
+                    df_donnees['SCR (€)'].mean(),
+                    df_donnees['SCR (€)'].median(),
+                    df_donnees['SCR (€)'].std(),
+                    df_donnees['SCR (€)'].min(),
+                    df_donnees['SCR (€)'].max()
+                ],
+                'MCR (€)': [
+                    df_donnees['MCR (€)'].mean(),
+                    df_donnees['MCR (€)'].median(),
+                    df_donnees['MCR (€)'].std(),
+                    df_donnees['MCR (€)'].min(),
+                    df_donnees['MCR (€)'].max()
+                ],
+                'Éléments éligibles (€)': [
+                    df_donnees['Éléments éligibles (€)'].mean(),
+                    df_donnees['Éléments éligibles (€)'].median(),
+                    df_donnees['Éléments éligibles (€)'].std(),
+                    df_donnees['Éléments éligibles (€)'].min(),
+                    df_donnees['Éléments éligibles (€)'].max()
+                ],
+                'Capital et primes (€)': [
+                    df_donnees['Capital et primes (€)'].mean(),
+                    df_donnees['Capital et primes (€)'].median(),
+                    df_donnees['Capital et primes (€)'].std(),
+                    df_donnees['Capital et primes (€)'].min(),
+                    df_donnees['Capital et primes (€)'].max()
+                ],
+                'Réserve de réconciliation (€)': [
+                    df_donnees['Réserve de réconciliation (€)'].mean(),
+                    df_donnees['Réserve de réconciliation (€)'].median(),
+                    df_donnees['Réserve de réconciliation (€)'].std(),
+                    df_donnees['Réserve de réconciliation (€)'].min(),
+                    df_donnees['Réserve de réconciliation (€)'].max()
+                ],
+                'Dettes subordonnées (€)': [
+                    df_donnees['Dettes subordonnées (€)'].mean(),
+                    df_donnees['Dettes subordonnées (€)'].median(),
+                    df_donnees['Dettes subordonnées (€)'].std(),
+                    df_donnees['Dettes subordonnées (€)'].min(),
+                    df_donnees['Dettes subordonnées (€)'].max()
+                ],
+                'Fonds excédentaires (€)': [
+                    df_donnees['Fonds excédentaires (€)'].mean(),
+                    df_donnees['Fonds excédentaires (€)'].median(),
+                    df_donnees['Fonds excédentaires (€)'].std(),
+                    df_donnees['Fonds excédentaires (€)'].min(),
+                    df_donnees['Fonds excédentaires (€)'].max()
+                ],
+                'Ratio de solvabilité (%)': [
+                    df_donnees['Ratio de solvabilité (%)'].mean(),
+                    df_donnees['Ratio de solvabilité (%)'].median(),
+                    df_donnees['Ratio de solvabilité (%)'].std(),
+                    df_donnees['Ratio de solvabilité (%)'].min(),
+                    df_donnees['Ratio de solvabilité (%)'].max()
+                ]
+            }
+            stats_df = pd.DataFrame(stats_data)
+            
+            # Ajouter les statistiques en dessous des données brutes
+            workbook = writer.book
+            worksheet = writer.sheets['Données brutes']
+            
+            # Masquer le quadrillage pour toute la feuille
+            worksheet.sheet_view.showGridLines = False
+            
+            # Déterminer la ligne où commencer à écrire les statistiques
+            start_row = len(df_donnees) + 3
+            
+            # Écrire un titre pour la section statistiques
+            worksheet.cell(row=start_row, column=1, value="STATISTIQUES")
+            worksheet.cell(row=start_row, column=1).font = openpyxl.styles.Font(bold=True, size=14)
+            
+            # Écrire les en-têtes des colonnes pour les statistiques
+            for j, col in enumerate(stats_df.columns):
+                cell = worksheet.cell(row=start_row + 1, column=j + 1)
+                cell.value = col
+                cell.font = openpyxl.styles.Font(bold=True)
+                cell.fill = openpyxl.styles.PatternFill(start_color="E0E0E0", end_color="E0E0E0", fill_type="solid")
+                cell.border = openpyxl.styles.Border(
+                    bottom=openpyxl.styles.Side(style='thin'),
+                    top=openpyxl.styles.Side(style='thin'),
+                    left=openpyxl.styles.Side(style='thin'),
+                    right=openpyxl.styles.Side(style='thin')
+                )
+            
+            # Écrire les statistiques
+            for i, row in enumerate(stats_df.values):
+                for j, value in enumerate(row):
+                    cell = worksheet.cell(row=start_row + 2 + i, column=j + 1)
+                    if j == 0:  # Première colonne (Métrique)
+                        cell.value = value
+                        cell.font = openpyxl.styles.Font(bold=True)
+                    else:  # Colonnes de données
+                        if isinstance(value, (int, float)):
+                            if j == 8:  # Ratio de solvabilité (%)
+                                cell.value = value
+                                cell.number_format = '0.00"%"'
+                            else:
+                                cell.value = value
+                                cell.number_format = '#,##0.00'
+                        else:
+                            cell.value = value
+                    
+                    # Ajouter des bordures à toutes les cellules des statistiques
+                    cell.border = openpyxl.styles.Border(
+                        left=openpyxl.styles.Side(style='thin'),
+                        right=openpyxl.styles.Side(style='thin'),
+                        bottom=openpyxl.styles.Side(style='thin'),
+                        top=openpyxl.styles.Side(style='thin')
+                    )
+            
+            # Ajouter des bordures aux données brutes
+            for row_idx in range(1, len(df_donnees) + 2):
+                for col_idx in range(1, len(df_donnees.columns) + 1):
+                    cell = worksheet.cell(row=row_idx, column=col_idx)
+                    cell.border = openpyxl.styles.Border(
+                        left=openpyxl.styles.Side(style='thin'),
+                        right=openpyxl.styles.Side(style='thin'),
+                        bottom=openpyxl.styles.Side(style='thin'),
+                        top=openpyxl.styles.Side(style='thin')
+                    )
+                    
+                    # Mettre en forme les en-têtes des colonnes
+                    if row_idx == 1:
+                        cell.font = openpyxl.styles.Font(bold=True)
+                        cell.fill = openpyxl.styles.PatternFill(start_color="E0E0E0", end_color="E0E0E0", fill_type="solid")
+            
+            # Ajouter une feuille "Fonds propres"
+            fonds_propres_columns = [
+                'Société', 
+                'Éléments éligibles (€)', 
+                'SCR (€)', 
+                'Capital et primes (€)', 
+                'Réserve de réconciliation (€)', 
+                'Dettes subordonnées (€)', 
+                'Fonds excédentaires (€)'
             ]
-        })
-        
-        df_data.to_excel(writer, sheet_name='Données', index=False)
-        stats.to_excel(writer, sheet_name='Données', startrow=len(df_data) + 3, index=False)
-        workbook = writer.book
-        ws = writer.sheets['Données']
-        header_style = openpyxl.styles.NamedStyle(
-            name='header',
-            font=openpyxl.styles.Font(bold=True, color='FFFFFF'),
-            fill=openpyxl.styles.PatternFill(start_color='366092', end_color='366092', fill_type='solid'),
-            alignment=openpyxl.styles.Alignment(horizontal='center', vertical='center'),
-            border=openpyxl.styles.Border(
-                left=openpyxl.styles.Side(style='thin'),
-                right=openpyxl.styles.Side(style='thin'),
-                top=openpyxl.styles.Side(style='thin'),
-                bottom=openpyxl.styles.Side(style='thin')
-            )
+            
+            # Créer un DataFrame pour la feuille Fonds propres
+            fonds_propres_df = df_donnees[fonds_propres_columns].copy()
+            
+            # Trier par Éléments éligibles décroissants
+            fonds_propres_df = fonds_propres_df.sort_values(by='Éléments éligibles (€)', ascending=False)
+            
+            # Écrire dans une nouvelle feuille
+            fonds_propres_df.to_excel(writer, sheet_name="Fonds propres", index=False)
+            
+            # Formater la feuille Fonds propres
+            worksheet = writer.sheets['Fonds propres']
+            
+            # Masquer le quadrillage
+            worksheet.sheet_view.showGridLines = False
+            
+            # Formater les en-têtes de colonnes
+            for col_num, column_title in enumerate(fonds_propres_columns, 1):
+                cell = worksheet.cell(row=1, column=col_num)
+                cell.font = openpyxl.styles.Font(bold=True)
+                cell.alignment = openpyxl.styles.Alignment(horizontal='center')
+                cell.fill = openpyxl.styles.PatternFill(start_color="E0E0E0", end_color="E0E0E0", fill_type="solid")
+                cell.border = openpyxl.styles.Border(
+                    bottom=openpyxl.styles.Side(style='thin'),
+                    top=openpyxl.styles.Side(style='thin'),
+                    left=openpyxl.styles.Side(style='thin'),
+                    right=openpyxl.styles.Side(style='thin')
+                )
+                
+            # Formater les valeurs numériques
+            for row_idx in range(2, len(fonds_propres_df) + 2):
+                for col_idx in range(1, len(fonds_propres_columns) + 1):
+                    cell = worksheet.cell(row=row_idx, column=col_idx)
+                    
+                    # Appliquer le format numérique aux colonnes de données
+                    if col_idx > 1:
+                        cell.number_format = '#,##0.00'
+                    
+                    # Ajouter des bordures à toutes les cellules
+                    cell.border = openpyxl.styles.Border(
+                        left=openpyxl.styles.Side(style='thin'),
+                        right=openpyxl.styles.Side(style='thin'),
+                        bottom=openpyxl.styles.Side(style='thin'),
+                        top=openpyxl.styles.Side(style='thin')
+                    )
+            
+            # Ajuster la largeur des colonnes dans les deux feuilles
+            for sheet_name in ["Données brutes", "Fonds propres"]:
+                worksheet = writer.sheets[sheet_name]
+                for column in worksheet.columns:
+                    max_length = 0
+                    column_letter = column[0].column_letter
+                    for cell in column:
+                        try:
+                            if len(str(cell.value)) > max_length:
+                                max_length = len(str(cell.value))
+                        except:
+                            pass
+                    adjusted_width = (max_length + 2)
+                    worksheet.column_dimensions[column_letter].width = adjusted_width
+
+        buffer.seek(0)
+        st.download_button(
+            label="📥 Télécharger les données (XLSX)",
+            data=buffer,
+            file_name=filename,
+            mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
         )
-
-        for cell in ws[1]:
-            cell.style = header_style
-
-        stats_header_row = len(df_data) + 4
-        for cell in ws[stats_header_row]:
-            cell.style = header_style
-
-        for column in ws.columns:
-            max_length = 0
-            column = [cell for cell in column]
-            for cell in column:
-                try:
-                    if len(str(cell.value)) > max_length:
-                        max_length = len(str(cell.value))
-                except:
-                    pass
-            adjusted_width = (max_length + 2)
-            ws.column_dimensions[column[0].column_letter].width = adjusted_width
-
-        ws.freeze_panes = 'A2'
-        ws_graphs = workbook.create_sheet(title='Graphiques')
-        for metric, start_row in [
-            ("SCR (€)", 1), 
-            ("MCR (€)", 15), 
-            ("Fonds propres (€)", 30),
-            ("Ratio de solvabilité (%)", 45)
-        ]:
-            chart = openpyxl.chart.BarChart()
-            chart.title = f"{metric} par société"
-            chart.y_axis.title = metric
-            chart.x_axis.title = "Société"
-            
-            data = openpyxl.chart.Reference(
-                writer.sheets['Données'],
-                min_col=df.columns.get_loc(metric) + 1,
-                min_row=1,
-                max_row=len(df_data) + 1,
-                max_col=df.columns.get_loc(metric) + 1
-            )
-            cats = openpyxl.chart.Reference(
-                writer.sheets['Données'],
-                min_col=df.columns.get_loc('Société') + 1,
-                min_row=2,
-                max_row=len(df_data) + 1
-            )
-            
-            chart.add_data(data, titles_from_data=True)
-            chart.set_categories(cats)
-            serie_moyenne = openpyxl.chart.ScatterChart()
-            serie_moyenne.y_axis.crosses = "max"
-            serie_moyenne.title = "Moyenne"
-            ws_graphs.add_chart(chart, f"A{start_row}")
-        
-        for column in ws_graphs.columns:
-            max_length = 0
-            column = [cell for cell in column]
-            for cell in column:
-                try:
-                    if len(str(cell.value)) > max_length:
-                        max_length = len(str(cell.value))
-                except:
-                    pass
-
-            adjusted_width = (max_length + 2)
-            ws_graphs.column_dimensions[column[0].column_letter].width = adjusted_width
-
-    buffer.seek(0)
-    st.download_button(
-        label="Télécharger les données",
-        data=buffer,
-        file_name=filename,
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-    )
+    except Exception as e:
+        st.error(f"Erreur lors de la création du fichier Excel : {e}")
 
 def create_matplotlib_figure(data, title, x_label, y_label, color='steelblue', moyenne=None):
     fig, ax = plt.subplots(figsize=(12, 8), dpi=120)
@@ -358,6 +593,85 @@ def get_predefined_prompts():
         "Analyse du MCR": "Donne les détails sur le MCR (Minimum Capital Requirement). Précise son montant (attention à bien convertir si en millions d'euros), explique son calcul et son évolution par rapport à l'année précédente."
     }
 
+def process_pdf_unified(source_id, pdf_name):
+    base_response = chat_with_pdf(source_id, QUESTION_TEMPLATE_BASE, prompt=PROMPT_TEMPLATE_BASE)
+    df_base = parse_base_text(base_response)
+    
+    # Vérifie si df_base est vide ou si la colonne 'Société' est manquante
+    if df_base.empty or 'Société' not in df_base.columns:
+        df_base = pd.DataFrame({
+            'Société': [f"Société inconnue ({pdf_name})"],
+            'SCR (€)': [np.nan],
+            'MCR (€)': [np.nan],
+            'Ratio de solvabilité (%)': [np.nan]
+        })
+    
+    societe = df_base['Société'].iloc[0] if not df_base.empty else f"Société inconnue ({pdf_name})"
+    
+    fonds_propres_response = chat_with_pdf(source_id, QUESTION_TEMPLATE_FONDS_PROPRES, prompt=PROMPT_TEMPLATE_FONDS_PROPRES)
+    df_fonds_propres = parse_fonds_propres_text(fonds_propres_response)
+    df_fonds_propres['Société'] = societe
+    
+    column_mapping = {
+        'Éléments éligibles (€)': 'Éléments éligibles (€)',
+        'Capital et primes (€)': 'Capital et primes (€)',
+        'Réserve de réconciliation (€)': 'Réserve de réconciliation (€)',
+        'Dettes subordonnées (€)': 'Dettes subordonnées (€)',
+        'Fonds excédentaires (€)': 'Fonds excédentaires (€)'
+    }
+    
+    df_fonds_propres = df_fonds_propres.rename(columns=column_mapping)
+    
+    for col in column_mapping.values():
+        if col not in df_fonds_propres.columns:
+            df_fonds_propres[col] = np.nan
+    
+    # Fusionner les résultats
+    try:
+        df = pd.merge(df_base, df_fonds_propres, on='Société', how='outer')
+    except KeyError as e:
+        # En cas d'erreur, créer un DataFrame combiné manuellement
+        st.warning(f"Erreur lors de la fusion des données pour {pdf_name}: {e}")
+        
+        # Créer un DataFrame combiné avec toutes les colonnes
+        df = pd.DataFrame({
+            'Société': [societe],
+            'SCR (€)': [df_base['SCR (€)'].iloc[0] if not df_base.empty else np.nan],
+            'MCR (€)': [df_base['MCR (€)'].iloc[0] if not df_base.empty else np.nan],
+            'Ratio de solvabilité (%)': [df_base['Ratio de solvabilité (%)'].iloc[0] if not df_base.empty else np.nan],
+            'Éléments éligibles (€)': [df_fonds_propres['Éléments éligibles (€)'].iloc[0] if not df_fonds_propres.empty else np.nan],
+            'Capital et primes (€)': [df_fonds_propres['Capital et primes (€)'].iloc[0] if not df_fonds_propres.empty else np.nan],
+            'Réserve de réconciliation (€)': [df_fonds_propres['Réserve de réconciliation (€)'].iloc[0] if not df_fonds_propres.empty else np.nan],
+            'Dettes subordonnées (€)': [df_fonds_propres['Dettes subordonnées (€)'].iloc[0] if not df_fonds_propres.empty else np.nan],
+            'Fonds excédentaires (€)': [df_fonds_propres['Fonds excédentaires (€)'].iloc[0] if not df_fonds_propres.empty else np.nan]
+        })
+    
+    return df
+
+def extract_amount(text):
+    # Extraire un montant d'une réponse textuelle
+    # Chercher d'abord un montant avec le symbole €
+    amount_pattern = r"(\d[\d\s]+(?:,\d+)?)\s*(?:€|euros)"
+    match = re.search(amount_pattern, text)
+    if match:
+        amount_str = match.group(1).replace(" ", "").replace(",", ".")
+        try:
+            return float(amount_str)
+        except ValueError:
+            return np.nan
+    
+    # Chercher un montant avec "millions" ou "M€"
+    million_pattern = r"(\d[\d\s]*(?:,\d+)?)\s*(?:millions|million|M)(?:\s*d['']\s*euros|\s*€)?"
+    match = re.search(million_pattern, text)
+    if match:
+        amount_str = match.group(1).replace(" ", "").replace(",", ".")
+        try:
+            return float(amount_str) * 1_000_000
+        except ValueError:
+            return np.nan
+    
+    return np.nan
+
 def main():
     st.title("📊 Analyse de rapports SFCR")
     st.markdown("""
@@ -378,8 +692,8 @@ def main():
     if "pdf_data" not in st.session_state:
         st.session_state.pdf_data = {}
     
-    prompt = PROMPT_TEMPLATE
-    question = QUESTION_TEMPLATE
+    prompt = PROMPT_TEMPLATE_BASE
+    question = QUESTION_TEMPLATE_BASE
 
     if uploaded_files:
         progress_placeholder = st.empty()
@@ -389,13 +703,14 @@ def main():
                 with st.spinner(f"Traitement en cours..."):
                     source_id = add_pdf_from_file(pdf_file)
                     if source_id:
-                        answer = chat_with_pdf(source_id, question, prompt=prompt)
-                        if answer:
-                            df_pdf = parse_solvency_text(answer)
+                        # Utiliser process_pdf_unified pour tous les PDFs sans condition
+                        df_pdf = process_pdf_unified(source_id, pdf_file.name)
+                        
+                        if not df_pdf.empty:
                             st.session_state.pdf_data[pdf_file.name] = df_pdf
                             progress_placeholder.empty()
                         else:
-                            progress_placeholder.error(f"Aucune réponse reçue pour {pdf_file.name}")
+                            progress_placeholder.error(f"Aucune donnée extraite pour {pdf_file.name}")
                     else:
                         progress_placeholder.error(f"Erreur lors de l'obtention du source_id pour {pdf_file.name}")
         
@@ -470,12 +785,23 @@ def main():
                 )
                 
                 if selected_pdfs:
-                    combined_df = pd.concat([st.session_state.pdf_data[name] for name in selected_pdfs], ignore_index=True)
+                    # Créer une liste pour stocker les DataFrames 
+                    dfs_to_combine = []
+                    for name in selected_pdfs:
+                        df = st.session_state.pdf_data[name].copy()
+                        dfs_to_combine.append(df)
+                    
+                    combined_df = pd.concat(dfs_to_combine, ignore_index=True)
+                    
                     moyenne = pd.DataFrame({
                         'Société': ['Moyenne'],
                         'SCR (€)': [round(combined_df['SCR (€)'].mean(), 2)],
                         'MCR (€)': [round(combined_df['MCR (€)'].mean(), 2)],
-                        'Fonds propres (€)': [round(combined_df['Fonds propres (€)'].mean(), 2)],
+                        'Éléments éligibles (€)': [round(combined_df['Éléments éligibles (€)'].mean(), 2)],
+                        'Réserve de réconciliation (€)': [round(combined_df['Réserve de réconciliation (€)'].mean(), 2)],
+                        'Dettes subordonnées (€)': [round(combined_df['Dettes subordonnées (€)'].mean(), 2)],
+                        'Fonds excédentaires (€)': [round(combined_df['Fonds excédentaires (€)'].mean(), 2)],
+                        'Capital et primes (€)': [round(combined_df['Capital et primes (€)'].mean(), 2)],
                         'Ratio de solvabilité (%)': [round(combined_df['Ratio de solvabilité (%)'].mean(), 2)]
                     })
 
@@ -483,11 +809,60 @@ def main():
                     
                     download_excel(display_df, filename="analyse_sfcr.xlsx")
                     st.subheader("Comparaison entre PDFs")
-                    st.dataframe(display_df)
                     
-                    metric_tabs = st.tabs(["SCR ", "MCR ", "Fonds propres ", "Ratio de solvabilité "])
+                    # Définir les colonnes à afficher dans l'ordre souhaité (sans PDF)
+                    columns_to_display = [
+                        'Société', 'SCR (€)', 'MCR (€)', 'Éléments éligibles (€)', 
+                        'Capital et primes (€)', 'Réserve de réconciliation (€)', 
+                        'Dettes subordonnées (€)', 'Fonds excédentaires (€)', 
+                        'Ratio de solvabilité (%)'
+                    ]
                     
-                    with metric_tabs[0]:
+                    # Afficher le tableau avec toutes les colonnes dans l'ordre défini
+                    st.dataframe(display_df[columns_to_display])
+
+                    # Après la définition des onglets existants, ajoutez des onglets pour les nouvelles métriques
+                    metric_tabs = st.tabs([
+                        "SCR", "MCR", "Éléments éligibles", "Réserve de réconciliation", 
+                        "Dettes subordonnées", "Fonds excédentaires", "Capital et primes", "Ratio de solvabilité"
+                    ])
+
+                    # Puis ajoutez les visualisations pour les nouvelles métriques
+                    with metric_tabs[5]:  # Fonds excédentaires
+                        fig_fonds = create_matplotlib_figure(
+                            combined_df,
+                            "Fonds excédentaires par PDF",
+                            "Société", 
+                            "Fonds excédentaires (€)",
+                            'lightcoral',
+                            moyenne=moyenne['Fonds excédentaires (€)'].values[0]
+                        )
+                        st.pyplot(fig_fonds)
+
+                    with metric_tabs[6]:  # Capital et primes
+                        fig_capital = create_matplotlib_figure(
+                            combined_df,
+                            "Capital et primes par PDF",
+                            "Société", 
+                            "Capital et primes (€)",
+                            'lightblue',
+                            moyenne=moyenne['Capital et primes (€)'].values[0]
+                        )
+                        st.pyplot(fig_capital)
+
+                    with metric_tabs[4]:  # Dettes subordonnées
+                        fig_dettes = create_matplotlib_figure(
+                            combined_df,
+                            "Dettes subordonnées par PDF",
+                            "Société", 
+                            "Dettes subordonnées (€)",
+                            'lightgreen',
+                            moyenne=moyenne['Dettes subordonnées (€)'].values[0]
+                        )
+                        st.pyplot(fig_dettes)
+
+                    # Ajoutons les visualisations pour les onglets manquants
+                    with metric_tabs[0]:  # SCR
                         fig_scr = create_matplotlib_figure(
                             combined_df,
                             "SCR par PDF", 
@@ -497,8 +872,8 @@ def main():
                             moyenne=moyenne['SCR (€)'].values[0]
                         )
                         st.pyplot(fig_scr)
-                    
-                    with metric_tabs[1]:
+
+                    with metric_tabs[1]:  # MCR
                         fig_mcr = create_matplotlib_figure(
                             combined_df,
                             "MCR par PDF", 
@@ -508,19 +883,30 @@ def main():
                             moyenne=moyenne['MCR (€)'].values[0]
                         )
                         st.pyplot(fig_mcr)
-                    
-                    with metric_tabs[2]:
+
+                    with metric_tabs[2]:  # Éléments éligibles
                         fig_eof = create_matplotlib_figure(
                             combined_df,
-                            "Fonds propres par PDF",
+                            "Éléments éligibles par PDF",
                             "Société", 
-                            "Fonds propres (€)",
+                            "Éléments éligibles (€)",
                             'orange',
-                            moyenne=moyenne['Fonds propres (€)'].values[0]
+                            moyenne=moyenne['Éléments éligibles (€)'].values[0]
                         )
                         st.pyplot(fig_eof)
-                    
-                    with metric_tabs[3]:
+
+                    with metric_tabs[3]:  # Réserve de réconciliation
+                        fig_reserve = create_matplotlib_figure(
+                            combined_df,
+                            "Réserve de réconciliation par PDF",
+                            "Société", 
+                            "Réserve de réconciliation (€)",
+                            'purple',
+                            moyenne=moyenne['Réserve de réconciliation (€)'].values[0]
+                        )
+                        st.pyplot(fig_reserve)
+
+                    with metric_tabs[7]:  # Ratio de solvabilité
                         fig_ratio = create_matplotlib_figure(
                             combined_df,
                             "Ratio de solvabilité par PDF", 
@@ -532,8 +918,6 @@ def main():
                         st.pyplot(fig_ratio)
                 else:
                     st.info("Veuillez sélectionner au moins un PDF pour la comparaison.")
-    else:
-        st.warning("Aucun PDF n'a encore été traité. Veuillez uploader au moins un fichier .pdf.")
 
 if __name__ == "__main__":
     main()
