@@ -11,7 +11,7 @@ from io import BytesIO
 import altair as alt
 import openpyxl
 
-API_KEY = "sec_0CXaT5eGzNtGSDTkETkwTSJbyPdWAbJN"
+API_KEY = "sec_BYK0w5g6GosbHM7qiNpNTV2IzAVtWMp5"
 
 PROMPT_TEMPLATE_BASE = """
 Analyse le document et donne les réponses sous cette forme EXACTE, sans aucun texte supplémentaire :
